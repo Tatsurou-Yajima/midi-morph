@@ -97,6 +97,11 @@ def test_transcribe_drums_to_midi_falls_back_to_basic_pitch(tmp_path, monkeypatc
     )
     monkeypatch.setattr(
         midimorph,
+        "transcribe_drums_with_omnizart_docker",
+        lambda _stem, _dir: (_ for _ in ()).throw(RuntimeError("docker omnizart missing")),
+    )
+    monkeypatch.setattr(
+        midimorph,
         "transcribe_to_midi",
         lambda stem, _midi_dir, **_kwargs: tmp_path / f"{stem.stem}_basic_pitch.mid",
     )

@@ -1,0 +1,14 @@
+.git
+.gitignore
+.cursor
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+
+workspace
+outputs
+input
+assets/soundfonts

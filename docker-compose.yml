@@ -1,0 +1,14 @@
+services:
+  midimorph:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: midimorph-app:latest
+    platform: linux/amd64
+    working_dir: /app
+    volumes:
+      - ./input:/app/input
+      - ./outputs:/app/outputs
+      - ./workspace:/app/workspace
+      - ./assets/soundfonts:/app/assets/soundfonts
+    command: ["python", "midimorph.py"]

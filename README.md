@@ -16,35 +16,32 @@ MP3/WAV を読み込み、`drums / piano / accompaniment` の 3 パートに分�
 
 ## セットアップ
 
-### 1. システムツールのインストール
+### 1. Docker で実行（推奨）
+
+```bash
+docker compose build
+```
+
+```bash
+docker compose run --rm midimorph python midimorph.py
+```
+
+上記コマンドで、`input/` の最新音声を変換します。
+
+Apple Silicon 環境で Omnizart 依存を安定させるため、`docker-compose.yml` では `linux/amd64` を指定しています。
+
+### 2. ローカル実行（従来）
 
 ```bash
 brew install ffmpeg
-```
-
-```bash
 brew install fluidsynth
-```
-
-### 2. リポジトリのクローンと仮想環境
-
-```bash
-cd midi-morph
 python3 -m venv venv
 source venv/bin/activate
-```
-
-### 3. Python パッケージのインストール
-
-```bash
 pip install -r requirements.txt
 ```
 
-Omnizart を使う場合（推奨）は追加でインストールしてください。
-
-```bash
-pip install omnizart
-```
+ローカル実行時に Omnizart を使う場合は、追加で `pip install omnizart` を試してください。
+（環境によって `madmom` のビルドで失敗する場合があります）
 
 ### 4. SoundFont（.sf2）の準備
 
@@ -77,6 +74,12 @@ assets/soundfonts/
 python midimorph.py
 ```
 
+Docker の場合:
+
+```bash
+docker compose run --rm midimorph python midimorph.py
+```
+
 - 入力: `input/` ディレクトリ内の最新音声ファイル（mp3/wav/m4a/flac など）
 - 出力: 自動で `outputs/<曲名>_morphed.mp3` に保存されます
 
@@ -84,6 +87,12 @@ python midimorph.py
 
 ```bash
 python midimorph.py path/to/あなたの曲.mp3
+```
+
+Docker の場合:
+
+```bash
+docker compose run --rm midimorph python midimorph.py "input/your_song.mp3"
 ```
 
 `drums` パートはデフォルトで Omnizart のドラム解析を優先して MIDI 化し、

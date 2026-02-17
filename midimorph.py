@@ -24,6 +24,7 @@ OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 ASSETS_SOUNDFONTS = PROJECT_ROOT / "assets" / "soundfonts"
 DEMUCS_MODEL = "htdemucs_6s"
 SUPPORTED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg"}
+OMNIZART_DOCKER_IMAGE = "midimorph-omnizart:latest"
 
 ROLE_KEYWORDS = {
     "drums": ["drum", "kit"],
@@ -200,6 +201,47 @@ def transcribe_drums_with_omnizart(stem_wav: Path, midi_dir: Path) -> Path:
     raise RuntimeError(f"Omnizart で MIDI が見つかりませんでした: {stem_wav.name}")
 
 
+def transcribe_drums_with_omnizart_docker(stem_wav: Path, midi_dir: Path) -> Path:
+    if shutil.which("docker") is None:
+        raise RuntimeError("docker コマンドが見つかりません。")
+
+    try:
+        stem_rel = stem_wav.resolve().relative_to(PROJECT_ROOT)
+        midi_dir_rel = midi_dir.resolve().relative_to(PROJECT_ROOT)
+    except ValueError as error:
+        raise RuntimeError("Omnizart Docker 実行には、対象ファイルがプロジェクト配下にある必要があります。") from error
+
+    before = set(midi_dir.rglob("*.mid"))
+    cmd = [
+        "docker",
+        "run",
+        "--rm",
+        "-v",
+        f"{PROJECT_ROOT}:/work",
+        "-w",
+        "/work",
+        OMNIZART_DOCKER_IMAGE,
+        "omnizart",
+        "drum",
+        "transcribe",
+        f"/work/{stem_rel}",
+        "-o",
+        f"/work/{midi_dir_rel}",
+    ]
+    _run_cmd(cmd, f"Docker 上の Omnizart ドラム変換に失敗しました: {stem_wav.name}")
+    after = set(midi_dir.rglob("*.mid"))
+
+    new_midis = sorted(after - before, key=lambda p: p.name)
+    if new_midis:
+        return new_midis[0]
+
+    preferred = [p for p in after if stem_wav.stem.lower() in p.stem.lower()]
+    if preferred:
+        return sorted(preferred, key=lambda p: p.name)[0]
+
+    raise RuntimeError(f"Docker Omnizart で MIDI が見つかりませんでした: {stem_wav.name}")
+
+
 def transcribe_drums_to_midi(
     stem_wav: Path,
     midi_dir: Path,
@@ -210,7 +252,11 @@ def transcribe_drums_to_midi(
         try:
             return transcribe_drums_with_omnizart(stem_wav, midi_dir)
         except (FileNotFoundError, RuntimeError) as error:
-            print(f"Warning: Omnizart が使えないため basic-pitch にフォールバックします: {error}")
+            print(f"Warning: ローカル Omnizart が使えないため Docker を試します: {error}")
+            try:
+                return transcribe_drums_with_omnizart_docker(stem_wav, midi_dir)
+            except RuntimeError as docker_error:
+                print(f"Warning: Docker Omnizart も使えないため basic-pitch にフォールバックします: {docker_error}")
 
     return transcribe_to_midi(
         stem_wav,
