@@ -40,6 +40,12 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Omnizart を使う場合（推奨）は追加でインストールしてください。
+
+```bash
+pip install omnizart
+```
+
 ### 4. SoundFont（.sf2）の準備
 
 Phase 3 で MIDI を音声に変換するために、**drums / piano / accompaniment** 用の SoundFont が必要です。
@@ -80,7 +86,11 @@ python midimorph.py
 python midimorph.py path/to/あなたの曲.mp3
 ```
 
-`drums` パートは MIDI 変換後に自動で GM ドラムチャンネル（10ch）へ補正してからレンダリングします。
+`drums` パートはデフォルトで Omnizart のドラム解析を優先して MIDI 化し、
+使えない環境では自動で basic-pitch にフォールバックします。
+その後、MIDI を GM ドラムチャンネル（10ch）へ補正してからレンダリングします。
+また、basic-pitch フォールバック時は `drums` の MIDI を高感度設定で変換し、ノートが欠けにくいようにしています。
+さらに、原音のアタック(onset)からドラムノートを追加レイヤーして、密度を補います。
 
 ### 出力先を指定する
 
@@ -123,6 +133,9 @@ python midimorph.py input.mp3 \
 | `--piano-sf2` | piano 用 SoundFont のパス |
 | `--accompaniment-sf2` | accompaniment 用 SoundFont のパス |
 | `--drums-only` | Demucs の `drums.wav` のみを出力（Phase 2 以降をスキップ） |
+| `--no-drum-midi-dense` | drums の MIDI 高感度化を無効化（従来挙動） |
+| `--no-drum-onset-layer` | drums の onset 補強レイヤーを無効化 |
+| `--drum-transcriber` | drums の MIDI 変換エンジン（`omnizart` / `basic-pitch`、デフォルトは `omnizart`） |
 
 ---
 

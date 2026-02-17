@@ -11,7 +11,9 @@ import sys
 import sysconfig
 from pathlib import Path
 
+import librosa
 import mido
+import numpy as np
 from pydub import AudioSegment
 
 
@@ -135,12 +137,34 @@ def build_accompaniment_stem(stems_dir: Path, workspace: Path, duration_ms: int)
     return accompaniment_wav
 
 
-def transcribe_to_midi(stem_wav: Path, midi_dir: Path) -> Path:
+def transcribe_to_midi(
+    stem_wav: Path,
+    midi_dir: Path,
+    onset_threshold: float | None = None,
+    frame_threshold: float | None = None,
+    minimum_note_length: int | None = None,
+    minimum_frequency: float | None = None,
+    maximum_frequency: float | None = None,
+    no_melodia: bool = False,
+) -> Path:
     if not stem_wav.exists():
         raise FileNotFoundError(f"入力ステムが見つかりません: {stem_wav}")
 
     before = set(midi_dir.glob("*.mid"))
-    cmd = ["basic-pitch", str(midi_dir), str(stem_wav)]
+    cmd = ["basic-pitch"]
+    if onset_threshold is not None:
+        cmd.extend(["--onset-threshold", str(onset_threshold)])
+    if frame_threshold is not None:
+        cmd.extend(["--frame-threshold", str(frame_threshold)])
+    if minimum_note_length is not None:
+        cmd.extend(["--minimum-note-length", str(minimum_note_length)])
+    if minimum_frequency is not None:
+        cmd.extend(["--minimum-frequency", str(minimum_frequency)])
+    if maximum_frequency is not None:
+        cmd.extend(["--maximum-frequency", str(maximum_frequency)])
+    if no_melodia:
+        cmd.append("--no-melodia")
+    cmd.extend([str(midi_dir), str(stem_wav)])
     _run_cmd(cmd, f"Basic Pitch の変換に失敗しました: {stem_wav.name}")
     after = set(midi_dir.glob("*.mid"))
 
@@ -154,6 +178,50 @@ def transcribe_to_midi(stem_wav: Path, midi_dir: Path) -> Path:
         return sorted(preferred, key=lambda p: p.name)[0]
 
     raise RuntimeError(f"MIDI が見つかりませんでした: {stem_wav.name}")
+
+
+def transcribe_drums_with_omnizart(stem_wav: Path, midi_dir: Path) -> Path:
+    if not stem_wav.exists():
+        raise FileNotFoundError(f"入力ステムが見つかりません: {stem_wav}")
+
+    before = set(midi_dir.rglob("*.mid"))
+    cmd = ["omnizart", "drum", "transcribe", str(stem_wav), "-o", str(midi_dir)]
+    _run_cmd(cmd, f"Omnizart のドラム変換に失敗しました: {stem_wav.name}")
+    after = set(midi_dir.rglob("*.mid"))
+
+    new_midis = sorted(after - before, key=lambda p: p.name)
+    if new_midis:
+        return new_midis[0]
+
+    preferred = [p for p in after if stem_wav.stem.lower() in p.stem.lower()]
+    if preferred:
+        return sorted(preferred, key=lambda p: p.name)[0]
+
+    raise RuntimeError(f"Omnizart で MIDI が見つかりませんでした: {stem_wav.name}")
+
+
+def transcribe_drums_to_midi(
+    stem_wav: Path,
+    midi_dir: Path,
+    drum_transcriber: str,
+    drum_midi_dense: bool,
+) -> Path:
+    if drum_transcriber == "omnizart":
+        try:
+            return transcribe_drums_with_omnizart(stem_wav, midi_dir)
+        except (FileNotFoundError, RuntimeError) as error:
+            print(f"Warning: Omnizart が使えないため basic-pitch にフォールバックします: {error}")
+
+    return transcribe_to_midi(
+        stem_wav,
+        midi_dir,
+        onset_threshold=0.35 if drum_midi_dense else None,
+        frame_threshold=0.2 if drum_midi_dense else None,
+        minimum_note_length=40 if drum_midi_dense else None,
+        minimum_frequency=35.0 if drum_midi_dense else None,
+        maximum_frequency=6000.0 if drum_midi_dense else None,
+        no_melodia=drum_midi_dense,
+    )
 
 
 def find_soundfont_for_role(role: str) -> Path | None:
@@ -200,6 +268,102 @@ def convert_midi_to_drum_channel(midi_path: Path) -> Path:
     return converted_path
 
 
+def extract_onset_drum_events(stem_wav: Path) -> list[tuple[float, int, int]]:
+    """drums 音源のアタックから簡易ドラムイベント(秒, note, velocity)を抽出する。"""
+    y, sr = librosa.load(str(stem_wav), sr=22050, mono=True)
+    hop_length = 512
+
+    onset_strength = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
+    onset_frames = librosa.onset.onset_detect(
+        onset_envelope=onset_strength,
+        sr=sr,
+        hop_length=hop_length,
+        backtrack=False,
+        pre_max=3,
+        post_max=3,
+        pre_avg=3,
+        post_avg=5,
+        delta=0.2,
+        wait=1,
+    )
+    if len(onset_frames) == 0:
+        return []
+
+    spectrum = np.abs(librosa.stft(y, n_fft=2048, hop_length=hop_length))
+    frequencies = librosa.fft_frequencies(sr=sr, n_fft=2048)
+    low_mask = frequencies < 180
+    high_mask = frequencies > 3500
+    centroid = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)[0]
+    strength_ref = float(np.percentile(onset_strength, 95)) + 1e-6
+
+    events: list[tuple[float, int, int]] = []
+    for frame in onset_frames:
+        if frame >= spectrum.shape[1] or frame >= len(centroid):
+            continue
+
+        low_energy = float(spectrum[low_mask, frame].sum())
+        high_energy = float(spectrum[high_mask, frame].sum())
+        total_energy = float(spectrum[:, frame].sum()) + 1e-6
+        centroid_hz = float(centroid[frame])
+
+        # 簡易分類: 低域優勢=kick, 高域優勢/高重心=hat, それ以外=snare
+        if low_energy / total_energy > 0.45:
+            note = 36  # Kick
+        elif high_energy / total_energy > 0.35 or centroid_hz > 3000:
+            note = 42  # Closed Hat
+        else:
+            note = 38  # Snare
+
+        strength = float(onset_strength[frame]) if frame < len(onset_strength) else 0.0
+        velocity = int(np.clip(45 + (strength / strength_ref) * 80, 35, 127))
+        onset_seconds = float(librosa.frames_to_time(frame, sr=sr, hop_length=hop_length))
+        events.append((onset_seconds, note, velocity))
+
+    return events
+
+
+def augment_drum_midi_with_onsets(midi_path: Path, stem_wav: Path) -> Path:
+    """既存ドラムMIDIに onset 由来のドラムノートを追加する。"""
+    events = extract_onset_drum_events(stem_wav)
+    if not events:
+        return midi_path
+
+    midi_data = mido.MidiFile(str(midi_path))
+    ticks_per_beat = midi_data.ticks_per_beat
+    tempo = 500000
+    for track in midi_data.tracks:
+        for message in track:
+            if message.type == "set_tempo":
+                tempo = message.tempo
+                break
+
+    overlay_abs_messages: list[tuple[int, mido.Message]] = []
+    note_duration_ticks = max(1, int(mido.second2tick(0.08, ticks_per_beat, tempo)))
+    for onset_seconds, note, velocity in events:
+        start_tick = int(mido.second2tick(onset_seconds, ticks_per_beat, tempo))
+        overlay_abs_messages.append((start_tick, mido.Message("note_on", note=note, velocity=velocity, channel=9, time=0)))
+        overlay_abs_messages.append(
+            (
+                start_tick + note_duration_ticks,
+                mido.Message("note_off", note=note, velocity=0, channel=9, time=0),
+            )
+        )
+
+    overlay_abs_messages.sort(key=lambda item: item[0])
+    overlay_track = mido.MidiTrack()
+    previous_tick = 0
+    for abs_tick, message in overlay_abs_messages:
+        delta = max(0, abs_tick - previous_tick)
+        message.time = delta
+        overlay_track.append(message)
+        previous_tick = abs_tick
+
+    midi_data.tracks.append(overlay_track)
+    dense_path = midi_path.with_name(f"{midi_path.stem}_onset_dense.mid")
+    midi_data.save(str(dense_path))
+    return dense_path
+
+
 def phase4_mix_and_export(
     drums_wav: Path, piano_wav: Path, accompaniment_wav: Path, output_path: Path, duration_ms: int
 ) -> None:
@@ -241,6 +405,9 @@ def process_music(
     piano_sf2_path: str | None = None,
     accompaniment_sf2_path: str | None = None,
     drums_only: bool = False,
+    drum_midi_dense: bool = True,
+    drum_onset_layer: bool = True,
+    drum_transcriber: str = "omnizart",
 ) -> None:
     ensure_dirs()
     input_file = resolve_input_file(input_path)
@@ -271,10 +438,15 @@ def process_music(
     print("--- Phase 2: Audio to MIDI ---")
     midi_dir = workspace / "midi"
     midi_dir.mkdir(parents=True, exist_ok=True)
-    drums_midi = transcribe_to_midi(drums_source, midi_dir)
+    drums_midi = transcribe_drums_to_midi(drums_source, midi_dir, drum_transcriber, drum_midi_dense)
     piano_midi = transcribe_to_midi(piano_source, midi_dir)
     accompaniment_midi = transcribe_to_midi(accompaniment_source, midi_dir)
     drums_midi = convert_midi_to_drum_channel(drums_midi)
+    if drum_onset_layer:
+        try:
+            drums_midi = augment_drum_midi_with_onsets(drums_midi, drums_source)
+        except Exception as error:  # noqa: BLE001
+            print(f"Warning: onset ベースのドラム補強をスキップしました: {error}")
 
     print("--- Phase 3: Library Sound Rendering ---")
     drums_sf2 = resolve_sf2("drums", drums_sf2_path)
@@ -306,6 +478,22 @@ def main() -> None:
     parser.add_argument("--piano-sf2", help="Piano SoundFont path (.sf2)")
     parser.add_argument("--accompaniment-sf2", help="Accompaniment SoundFont path (.sf2)")
     parser.add_argument("--drums-only", action="store_true", help="Demucs で抽出した drums.wav のみを出力する")
+    parser.add_argument(
+        "--no-drum-midi-dense",
+        action="store_true",
+        help="drums の MIDI 高感度化を無効化する（従来挙動）",
+    )
+    parser.add_argument(
+        "--no-drum-onset-layer",
+        action="store_true",
+        help="drums の onset ベース補強を無効化する",
+    )
+    parser.add_argument(
+        "--drum-transcriber",
+        choices=["omnizart", "basic-pitch"],
+        default="omnizart",
+        help="drums の MIDI 変換エンジン（デフォルト: omnizart。失敗時は basic-pitch にフォールバック）",
+    )
     args = parser.parse_args()
 
     try:
@@ -316,6 +504,9 @@ def main() -> None:
             piano_sf2_path=args.piano_sf2,
             accompaniment_sf2_path=args.accompaniment_sf2,
             drums_only=args.drums_only,
+            drum_midi_dense=not args.no_drum_midi_dense,
+            drum_onset_layer=not args.no_drum_onset_layer,
+            drum_transcriber=args.drum_transcriber,
         )
     except (FileNotFoundError, RuntimeError) as error:
         print(f"Error: {error}", file=sys.stderr)

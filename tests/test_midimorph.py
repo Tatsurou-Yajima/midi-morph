@@ -84,6 +84,28 @@ def test_transcribe_to_midi_picks_new_file(tmp_path, monkeypatch):
     assert result.name == "piano_basic_pitch.mid"
 
 
+def test_transcribe_drums_to_midi_falls_back_to_basic_pitch(tmp_path, monkeypatch):
+    stem_wav = tmp_path / "drums.wav"
+    midi_dir = tmp_path / "midi"
+    midi_dir.mkdir(parents=True, exist_ok=True)
+    stem_wav.write_bytes(b"dummy")
+
+    monkeypatch.setattr(
+        midimorph,
+        "transcribe_drums_with_omnizart",
+        lambda _stem, _dir: (_ for _ in ()).throw(RuntimeError("omnizart missing")),
+    )
+    monkeypatch.setattr(
+        midimorph,
+        "transcribe_to_midi",
+        lambda stem, _midi_dir, **_kwargs: tmp_path / f"{stem.stem}_basic_pitch.mid",
+    )
+
+    result = midimorph.transcribe_drums_to_midi(stem_wav, midi_dir, drum_transcriber="omnizart", drum_midi_dense=True)
+
+    assert result.name == "drums_basic_pitch.mid"
+
+
 def test_convert_midi_to_drum_channel_sets_channel_10(tmp_path):
     midi_path = tmp_path / "drums.mid"
     midi_file = mido.MidiFile()
@@ -103,6 +125,31 @@ def test_convert_midi_to_drum_channel_sets_channel_10(tmp_path):
     assert converted.exists()
     assert channel_messages
     assert all(message.channel == 9 for message in channel_messages)
+
+
+def test_augment_drum_midi_with_onsets_appends_overlay_track(tmp_path, monkeypatch):
+    midi_path = tmp_path / "drums_ch10.mid"
+    midi_file = mido.MidiFile()
+    base_track = mido.MidiTrack()
+    midi_file.tracks.append(base_track)
+    base_track.append(mido.MetaMessage("set_tempo", tempo=500000, time=0))
+    midi_file.save(str(midi_path))
+
+    monkeypatch.setattr(
+        midimorph,
+        "extract_onset_drum_events",
+        lambda _stem_wav: [(0.0, 36, 100), (0.5, 38, 90)],
+    )
+
+    dense_path = midimorph.augment_drum_midi_with_onsets(midi_path, tmp_path / "drums.wav")
+    dense_midi = mido.MidiFile(str(dense_path))
+    overlay_track = dense_midi.tracks[-1]
+    note_on_messages = [msg for msg in overlay_track if msg.type == "note_on" and msg.velocity > 0]
+
+    assert dense_path.exists()
+    assert dense_path.name.endswith("_onset_dense.mid")
+    assert len(dense_midi.tracks) == 2
+    assert [msg.note for msg in note_on_messages] == [36, 38]
 
 
 def test_process_music_orchestrates_pipeline(tmp_path, monkeypatch):
@@ -135,7 +182,8 @@ def test_process_music_orchestrates_pipeline(tmp_path, monkeypatch):
         "build_accompaniment_stem",
         lambda _stems, _ws, _dur: tmp_path / "accompaniment_source.wav",
     )
-    monkeypatch.setattr(midimorph, "transcribe_to_midi", lambda stem, _midi_dir: tmp_path / f"{stem.stem}.mid")
+    monkeypatch.setattr(midimorph, "transcribe_drums_to_midi", lambda stem, _midi_dir, _t, _d: tmp_path / f"{stem.stem}.mid")
+    monkeypatch.setattr(midimorph, "transcribe_to_midi", lambda stem, _midi_dir, **_kwargs: tmp_path / f"{stem.stem}.mid")
     monkeypatch.setattr(midimorph, "convert_midi_to_drum_channel", lambda midi_path: midi_path)
     monkeypatch.setattr(midimorph, "resolve_sf2", lambda _role, _path=None: tmp_path / "dummy.sf2")
     monkeypatch.setattr(midimorph, "synthesize_midi_to_wav", lambda _midi, _sf2, out: out.write_bytes(b"dummy"))
@@ -183,7 +231,7 @@ def test_process_music_outputs_drums_only_and_skips_later_phases(tmp_path, monke
     monkeypatch.setattr(
         midimorph,
         "transcribe_to_midi",
-        lambda _stem, _midi_dir: pytest.fail("drums_only では MIDI 変換は呼ばれない想定"),
+        lambda _stem, _midi_dir, **_kwargs: pytest.fail("drums_only では MIDI 変換は呼ばれない想定"),
     )
 
     midimorph.process_music(str(input_file), drums_only=True)
