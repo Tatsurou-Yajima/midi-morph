@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+.pycache_tmp/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+.env/
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 環境変数（秘密情報を含む場合）
+.env
+.env.local
+.env.*.local
+
+# MidiMorph 生成物
+workspace/
+outputs/
