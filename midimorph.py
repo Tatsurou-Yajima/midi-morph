@@ -5,19 +5,23 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import sysconfig
 from pathlib import Path
 
+import mido
 from pydub import AudioSegment
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+INPUTS_DIR = PROJECT_ROOT / "input"
 WORKSPACE_DIR = PROJECT_ROOT / "workspace"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
 ASSETS_SOUNDFONTS = PROJECT_ROOT / "assets" / "soundfonts"
 DEMUCS_MODEL = "htdemucs_6s"
+SUPPORTED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg"}
 
 ROLE_KEYWORDS = {
     "drums": ["drum", "kit"],
@@ -54,9 +58,35 @@ def welcome_msg() -> None:
 
 
 def ensure_dirs() -> None:
+    INPUTS_DIR.mkdir(parents=True, exist_ok=True)
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     ASSETS_SOUNDFONTS.mkdir(parents=True, exist_ok=True)
+
+
+def resolve_input_file(input_path: str | None = None) -> Path:
+    if input_path is not None:
+        input_file = Path(input_path).expanduser().resolve()
+        if not input_file.exists():
+            raise FileNotFoundError(f"入力ファイルが見つかりません: {input_path}")
+        return input_file
+
+    ensure_dirs()
+    audio_candidates = sorted(
+        [
+            path
+            for path in INPUTS_DIR.iterdir()
+            if path.is_file() and path.suffix.lower() in SUPPORTED_AUDIO_EXTENSIONS
+        ],
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if not audio_candidates:
+        raise FileNotFoundError(
+            "入力ファイルが指定されていません。"
+            f" {INPUTS_DIR} に mp3/wav 等の音声を置くか、CLI 引数で入力ファイルを指定してください。"
+        )
+    return audio_candidates[0]
 
 
 def phase1_stem_separation(input_path: Path, workspace: Path) -> Path:
@@ -156,6 +186,20 @@ def synthesize_midi_to_wav(midi_path: Path, sf2_path: Path, output_wav: Path) ->
     _run_cmd(cmd, f"FluidSynth のレンダリングに失敗しました: {midi_path.name}")
 
 
+def convert_midi_to_drum_channel(midi_path: Path) -> Path:
+    """MIDI のチャンネルメッセージを GM ドラムチャンネル(10ch=9) に統一する。"""
+    midi_data = mido.MidiFile(str(midi_path))
+    converted_path = midi_path.with_name(f"{midi_path.stem}_drums_ch10.mid")
+
+    for track in midi_data.tracks:
+        for message in track:
+            if hasattr(message, "channel"):
+                message.channel = 9
+
+    midi_data.save(str(converted_path))
+    return converted_path
+
+
 def phase4_mix_and_export(
     drums_wav: Path, piano_wav: Path, accompaniment_wav: Path, output_path: Path, duration_ms: int
 ) -> None:
@@ -184,24 +228,22 @@ def resolve_sf2(role: str, user_path: str | None = None) -> Path:
         return auto
     raise FileNotFoundError(
         f"{role} 用 sf2 が見つかりません。"
-        "assets/soundfonts に .sf2 を置くか、"
-        f"--{role}-sf2 で明示指定してください。"
-        " 例: drums.sf2 / piano.sf2 / accompaniment.sf2"
+        " assets/soundfonts に .sf2 を置くか、"
+        f" --{role}-sf2 で明示指定してください。"
+        " README の「SoundFont（.sf2）の準備」を参照してください。"
     )
 
 
 def process_music(
-    input_path: str,
+    input_path: str | None = None,
     output_path: str | None = None,
     drums_sf2_path: str | None = None,
     piano_sf2_path: str | None = None,
     accompaniment_sf2_path: str | None = None,
+    drums_only: bool = False,
 ) -> None:
-    input_file = Path(input_path).resolve()
-    if not input_file.exists():
-        raise FileNotFoundError(f"入力ファイルが見つかりません: {input_path}")
-
     ensure_dirs()
+    input_file = resolve_input_file(input_path)
     welcome_msg()
 
     track_name = input_file.stem
@@ -209,15 +251,20 @@ def process_music(
     workspace.mkdir(parents=True, exist_ok=True)
 
     if output_path is None:
-        output_file = OUTPUTS_DIR / f"{track_name}_morphed.mp3"
+        output_file = OUTPUTS_DIR / (f"{track_name}_drums.wav" if drums_only else f"{track_name}_morphed.mp3")
     else:
-        output_file = Path(output_path).resolve()
+        output_file = Path(output_path).expanduser().resolve()
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     track_duration_ms = len(AudioSegment.from_file(str(input_file)))
 
     stems_dir = phase1_stem_separation(input_file, workspace)
     drums_source = stems_dir / "drums.wav"
+    if drums_only:
+        shutil.copy2(drums_source, output_file)
+        print(f"\nSuccess! '{input_file.name}' -> {output_file} (drums only)")
+        return
+
     piano_source = stems_dir / "piano.wav"
     accompaniment_source = build_accompaniment_stem(stems_dir, workspace, track_duration_ms)
 
@@ -227,6 +274,7 @@ def process_music(
     drums_midi = transcribe_to_midi(drums_source, midi_dir)
     piano_midi = transcribe_to_midi(piano_source, midi_dir)
     accompaniment_midi = transcribe_to_midi(accompaniment_source, midi_dir)
+    drums_midi = convert_midi_to_drum_channel(drums_midi)
 
     print("--- Phase 3: Library Sound Rendering ---")
     drums_sf2 = resolve_sf2("drums", drums_sf2_path)
@@ -248,11 +296,16 @@ def process_music(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="MidiMorph: MP3 -> drums/piano/accompaniment morph tool")
-    parser.add_argument("input", help="Path to input MP3/WAV file")
+    parser.add_argument(
+        "input",
+        nargs="?",
+        help="Path to input MP3/WAV file (省略時は input/ ディレクトリ内の最新音声を利用)",
+    )
     parser.add_argument("-o", "--output", help="Output MP3 path (default: outputs/<name>_morphed.mp3)")
     parser.add_argument("--drums-sf2", help="Drums SoundFont path (.sf2)")
     parser.add_argument("--piano-sf2", help="Piano SoundFont path (.sf2)")
     parser.add_argument("--accompaniment-sf2", help="Accompaniment SoundFont path (.sf2)")
+    parser.add_argument("--drums-only", action="store_true", help="Demucs で抽出した drums.wav のみを出力する")
     args = parser.parse_args()
 
     try:
@@ -262,6 +315,7 @@ def main() -> None:
             drums_sf2_path=args.drums_sf2,
             piano_sf2_path=args.piano_sf2,
             accompaniment_sf2_path=args.accompaniment_sf2,
+            drums_only=args.drums_only,
         )
     except (FileNotFoundError, RuntimeError) as error:
         print(f"Error: {error}", file=sys.stderr)

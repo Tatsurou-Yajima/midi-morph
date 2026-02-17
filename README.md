@@ -40,24 +40,62 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### 4. SoundFont（.sf2）の準備
+
+Phase 3 で MIDI を音声に変換するために、**drums / piano / accompaniment** 用の SoundFont が必要です。
+
+1. 次のいずれかから無料の .sf2 を入手し、`assets/soundfonts/` に置いてください。
+   - [GeneralUser GS](https://schristiancollins.com/generaluser.php)（総合）
+   - [FluidSynth 公式のテスト用 sf2](https://github.com/FluidSynth/fluidsynth/wiki/SoundFont) など
+2. ファイル名に次のキーワードが含まれると自動で役割が割り当てられます。
+   - **drums**: `drum`, `kit` を含むファイル名
+   - **piano**: `piano`, `keys`, `keyboard` を含むファイル名
+   - **accompaniment**: `accompaniment`, `strings`, `pad`, `orch`, `epiano`, `synth` を含むファイル名
+3. 1 つしか .sf2 を置かない場合は、その 1 つが全パートに使われます。
+
+例（3 つ置く場合）:
+```text
+assets/soundfonts/
+  drums.sf2
+  piano.sf2
+  accompaniment.sf2
+```
+
 ---
 
 ## 使い方
 
-### 基本的な実行（自動検出）
+### 基本的な実行（`input/` から自動検出）
+
+```bash
+python midimorph.py
+```
+
+- 入力: `input/` ディレクトリ内の最新音声ファイル（mp3/wav/m4a/flac など）
+- 出力: 自動で `outputs/<曲名>_morphed.mp3` に保存されます
+
+音声ファイルを明示指定したい場合は、従来どおり引数で指定できます。
 
 ```bash
 python midimorph.py path/to/あなたの曲.mp3
 ```
 
-- 入力: MP3 または WAV のパス
-- 出力: 自動で `outputs/<曲名>_morphed.mp3` に保存されます
+`drums` パートは MIDI 変換後に自動で GM ドラムチャンネル（10ch）へ補正してからレンダリングします。
 
 ### 出力先を指定する
 
 ```bash
-python midimorph.py path/to/曲.mp3 -o path/to/結果.mp3
+python midimorph.py -o path/to/結果.mp3
 ```
+
+### drums だけ抽出して出力する
+
+```bash
+python midimorph.py --drums-only
+```
+
+- 出力: `outputs/<曲名>_drums.wav`
+- `-o` を使えば任意の出力パスに変更できます。
 
 `assets/soundfonts/` からファイル名で自動検出します。
 
@@ -79,11 +117,12 @@ python midimorph.py input.mp3 \
 
 | 引数 | 説明 |
 |------|------|
-| `input` | 変換したい音声ファイルのパス（必須） |
+| `input` | 変換したい音声ファイルのパス（省略時は `input/` の最新音声を使用） |
 | `-o`, `--output` | 出力 MP3 のパス（省略時は `outputs/<曲名>_morphed.mp3`） |
 | `--drums-sf2` | drums 用 SoundFont のパス |
 | `--piano-sf2` | piano 用 SoundFont のパス |
 | `--accompaniment-sf2` | accompaniment 用 SoundFont のパス |
+| `--drums-only` | Demucs の `drums.wav` のみを出力（Phase 2 以降をスキップ） |
 
 ---
 
@@ -106,6 +145,7 @@ python midimorph.py input.mp3 \
 midi-morph/
 ├── midimorph.py          # メインスクリプト
 ├── requirements.txt
+├── input/                # 変換したい音声ファイルを置く（未指定実行時はここから最新を読む）
 ├── assets/
 │   └── soundfonts/       # ここに .sf2 を置くと新音色で再生される
 ├── outputs/              # 変換後の MP3（ここに出力）

@@ -34,3 +34,5 @@ Thumbs.db
 # MidiMorph 生成物
 workspace/
 outputs/
+input/
+assets/soundfonts/

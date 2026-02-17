@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import mido
 import pytest
 from pydub import AudioSegment
 
@@ -9,6 +10,31 @@ import midimorph
 def test_process_music_raises_when_input_file_missing():
     with pytest.raises(FileNotFoundError):
         midimorph.process_music("/path/to/not-found.mp3")
+
+
+def test_resolve_input_file_uses_latest_file_in_input_dir(tmp_path, monkeypatch):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    old_file = input_dir / "old.mp3"
+    new_file = input_dir / "new.wav"
+    old_file.write_bytes(b"dummy-old")
+    new_file.write_bytes(b"dummy-new")
+    old_file.touch()
+    new_file.touch()
+    monkeypatch.setattr(midimorph, "INPUTS_DIR", input_dir)
+
+    result = midimorph.resolve_input_file()
+
+    assert result == new_file.resolve()
+
+
+def test_resolve_input_file_raises_when_input_dir_is_empty(tmp_path, monkeypatch):
+    input_dir = tmp_path / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(midimorph, "INPUTS_DIR", input_dir)
+
+    with pytest.raises(FileNotFoundError):
+        midimorph.resolve_input_file()
 
 
 def test_find_soundfont_for_role(tmp_path, monkeypatch):
@@ -58,15 +84,38 @@ def test_transcribe_to_midi_picks_new_file(tmp_path, monkeypatch):
     assert result.name == "piano_basic_pitch.mid"
 
 
+def test_convert_midi_to_drum_channel_sets_channel_10(tmp_path):
+    midi_path = tmp_path / "drums.mid"
+    midi_file = mido.MidiFile()
+    track = mido.MidiTrack()
+    midi_file.tracks.append(track)
+    track.append(mido.Message("program_change", program=1, channel=3, time=0))
+    track.append(mido.Message("note_on", note=36, velocity=90, channel=3, time=0))
+    track.append(mido.Message("note_off", note=36, velocity=0, channel=3, time=120))
+    midi_file.save(str(midi_path))
+
+    converted = midimorph.convert_midi_to_drum_channel(midi_path)
+    converted_midi = mido.MidiFile(str(converted))
+    channel_messages = [
+        message for track in converted_midi.tracks for message in track if hasattr(message, "channel")
+    ]
+
+    assert converted.exists()
+    assert channel_messages
+    assert all(message.channel == 9 for message in channel_messages)
+
+
 def test_process_music_orchestrates_pipeline(tmp_path, monkeypatch):
     input_file = tmp_path / "song.mp3"
     input_file.write_bytes(b"dummy")
 
+    input_dir = tmp_path / "input"
     workspace_dir = tmp_path / "workspace"
     outputs_dir = tmp_path / "outputs"
     soundfonts_dir = tmp_path / "assets" / "soundfonts"
     soundfonts_dir.mkdir(parents=True, exist_ok=True)
 
+    monkeypatch.setattr(midimorph, "INPUTS_DIR", input_dir)
     monkeypatch.setattr(midimorph, "WORKSPACE_DIR", workspace_dir)
     monkeypatch.setattr(midimorph, "OUTPUTS_DIR", outputs_dir)
     monkeypatch.setattr(midimorph, "ASSETS_SOUNDFONTS", soundfonts_dir)
@@ -87,6 +136,7 @@ def test_process_music_orchestrates_pipeline(tmp_path, monkeypatch):
         lambda _stems, _ws, _dur: tmp_path / "accompaniment_source.wav",
     )
     monkeypatch.setattr(midimorph, "transcribe_to_midi", lambda stem, _midi_dir: tmp_path / f"{stem.stem}.mid")
+    monkeypatch.setattr(midimorph, "convert_midi_to_drum_channel", lambda midi_path: midi_path)
     monkeypatch.setattr(midimorph, "resolve_sf2", lambda _role, _path=None: tmp_path / "dummy.sf2")
     monkeypatch.setattr(midimorph, "synthesize_midi_to_wav", lambda _midi, _sf2, out: out.write_bytes(b"dummy"))
 
@@ -104,3 +154,40 @@ def test_process_music_orchestrates_pipeline(tmp_path, monkeypatch):
 
     assert called["duration"] == 1200
     assert called["output"] == outputs_dir / "song_morphed.mp3"
+
+
+def test_process_music_outputs_drums_only_and_skips_later_phases(tmp_path, monkeypatch):
+    input_file = tmp_path / "song.mp3"
+    input_file.write_bytes(b"dummy")
+
+    input_dir = tmp_path / "input"
+    workspace_dir = tmp_path / "workspace"
+    outputs_dir = tmp_path / "outputs"
+    soundfonts_dir = tmp_path / "assets" / "soundfonts"
+    soundfonts_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(midimorph, "INPUTS_DIR", input_dir)
+    monkeypatch.setattr(midimorph, "WORKSPACE_DIR", workspace_dir)
+    monkeypatch.setattr(midimorph, "OUTPUTS_DIR", outputs_dir)
+    monkeypatch.setattr(midimorph, "ASSETS_SOUNDFONTS", soundfonts_dir)
+    monkeypatch.setattr(midimorph, "welcome_msg", lambda: None)
+    monkeypatch.setattr(midimorph.AudioSegment, "from_file", lambda _p: AudioSegment.silent(duration=1200))
+
+    stems_dir = tmp_path / "stems_result"
+    stems_dir.mkdir(parents=True, exist_ok=True)
+    drums_source = stems_dir / "drums.wav"
+    drums_source.write_bytes(b"drums")
+    (stems_dir / "piano.wav").write_bytes(b"dummy")
+    monkeypatch.setattr(midimorph, "phase1_stem_separation", lambda _in, _ws: stems_dir)
+
+    monkeypatch.setattr(
+        midimorph,
+        "transcribe_to_midi",
+        lambda _stem, _midi_dir: pytest.fail("drums_only では MIDI 変換は呼ばれない想定"),
+    )
+
+    midimorph.process_music(str(input_file), drums_only=True)
+
+    out_file = outputs_dir / "song_drums.wav"
+    assert out_file.exists()
+    assert out_file.read_bytes() == b"drums"
